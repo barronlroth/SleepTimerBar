@@ -202,12 +202,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             active = true
         }
 
-        let image = NSImage(systemSymbolName: active ? "moon.zzz.fill" : "moon.zzz", accessibilityDescription: "Sleep Timer")
-        image?.isTemplate = true
-
-        button.image = image
-        button.contentTintColor = active ? .white : .tertiaryLabelColor
+        button.image = whiteStatusImage(systemName: active ? "moon.zzz.fill" : "moon.zzz")
+        button.contentTintColor = .white
         button.toolTip = statusTitle
+    }
+
+    private func whiteStatusImage(systemName: String) -> NSImage? {
+        let configuration = NSImage.SymbolConfiguration(paletteColors: [.white])
+        guard
+            let baseSymbol = NSImage(systemSymbolName: systemName, accessibilityDescription: "Sleep Timer"),
+            let symbol = baseSymbol.withSymbolConfiguration(configuration)
+        else {
+            return nil
+        }
+
+        let image = NSImage(size: NSSize(width: 18, height: 18))
+        image.lockFocus()
+        NSColor.white.set()
+
+        let rect = NSRect(x: 0, y: 0, width: 18, height: 18)
+        symbol.draw(
+            in: rect,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: nil
+        )
+        image.unlockFocus()
+        image.isTemplate = false
+
+        return image
     }
 
     private var statusTitle: String {
