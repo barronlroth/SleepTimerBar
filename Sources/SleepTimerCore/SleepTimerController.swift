@@ -21,11 +21,8 @@ public enum SleepTimerState: Equatable, Sendable {
 
 private struct SleepTimerSession {
     let snapshot: SleepTimerSnapshot
-    let initialBrightness: Double?
-    let initialVolume: Double?
-    let brightnessFloor: Double
-    let volumeFloor: Double
-    let curve: FadeCurve
+    var brightness: FadeChannel?
+    var volume: FadeChannel?
 }
 
 @MainActor
@@ -83,16 +80,27 @@ public final class SleepTimerController {
         brightnessFailed = false
         volumeFailed = false
 
-        let initialBrightness = readInitialBrightness()
-        let initialVolume = readInitialVolume()
+        let initialBrightness = readInitialBrightness().map {
+            FadeChannel(
+                currentValue: $0,
+                floor: settings.brightnessFloor,
+                curve: .linear,
+                date: startedAt
+            )
+        }
+        let initialVolume = readInitialVolume().map {
+            FadeChannel(
+                currentValue: $0,
+                floor: settings.volumeFloor,
+                curve: .linear,
+                date: startedAt
+            )
+        }
 
         session = SleepTimerSession(
             snapshot: snapshot,
-            initialBrightness: initialBrightness,
-            initialVolume: initialVolume,
-            brightnessFloor: settings.brightnessFloor,
-            volumeFloor: settings.volumeFloor,
-            curve: .linear
+            brightness: initialBrightness,
+            volume: initialVolume
         )
 
         state = .running(snapshot)
@@ -136,15 +144,17 @@ public final class SleepTimerController {
         let duration = session.snapshot.totalSeconds
 
         guard elapsed < duration else {
-            complete(session: session)
+            complete()
             return
         }
 
-        applyFade(session: session, elapsed: elapsed, duration: duration)
+        applyFade(date: date)
     }
 
-    private func complete(session: SleepTimerSession) {
-        applyFade(session: session, elapsed: session.snapshot.totalSeconds, duration: session.snapshot.totalSeconds)
+    private func complete() {
+        if let session {
+            applyFade(date: session.snapshot.endsAt)
+        }
 
         updateTimer?.invalidate()
         updateTimer = nil
@@ -158,40 +168,40 @@ public final class SleepTimerController {
         }
     }
 
-    private func applyFade(session: SleepTimerSession, elapsed: TimeInterval, duration: TimeInterval) {
-        if !brightnessFailed, let initialBrightness = session.initialBrightness {
-            let nextBrightness = FadeMath.interpolatedValue(
-                start: initialBrightness,
-                floor: session.brightnessFloor,
-                elapsed: elapsed,
-                duration: duration,
-                curve: session.curve
-            )
+    private func applyFade(date: Date) {
+        guard var session else { return }
 
+        if !brightnessFailed, var brightness = session.brightness {
             do {
+                let currentBrightness = try brightnessController.currentBrightness()
+                brightness.rebaseIfExternalChange(currentValue: currentBrightness, at: date)
+
+                let nextBrightness = brightness.value(at: date, endsAt: session.snapshot.endsAt)
                 try brightnessController.setBrightness(nextBrightness)
+                brightness.markApplied(nextBrightness)
+                session.brightness = brightness
             } catch {
                 brightnessFailed = true
                 onError?((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
             }
         }
 
-        if !volumeFailed, let initialVolume = session.initialVolume {
-            let nextVolume = FadeMath.interpolatedValue(
-                start: initialVolume,
-                floor: session.volumeFloor,
-                elapsed: elapsed,
-                duration: duration,
-                curve: session.curve
-            )
-
+        if !volumeFailed, var volume = session.volume {
             do {
+                let currentVolume = try volumeController.currentVolume()
+                volume.rebaseIfExternalChange(currentValue: currentVolume, at: date)
+
+                let nextVolume = volume.value(at: date, endsAt: session.snapshot.endsAt)
                 try volumeController.setVolume(nextVolume)
+                volume.markApplied(nextVolume)
+                session.volume = volume
             } catch {
                 volumeFailed = true
                 onError?((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
             }
         }
+
+        self.session = session
     }
 
     private func readInitialBrightness() -> Double? {
