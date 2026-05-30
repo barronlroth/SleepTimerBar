@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="Sleep Timer Bar share image">
+  <defs>
+    <linearGradient id="left-vignette" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#050505"/>
+      <stop offset="0.43" stop-color="#050505" stop-opacity="0.94"/>
+      <stop offset="0.72" stop-color="#050505" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#050505" stop-opacity="0.08"/>
+    </linearGradient>
+    <radialGradient id="warm-glow" cx="0.16" cy="0.2" r="0.52">
+      <stop offset="0" stop-color="#f7941d" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#f7941d" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="630" fill="#050505"/>
+  <image href="owl-hero.png" x="0" y="0" width="1200" height="630" preserveAspectRatio="xMidYMid slice"/>
+  <rect width="1200" height="630" fill="url(#left-vignette)"/>
+  <rect width="1200" height="630" fill="url(#warm-glow)"/>
+
+  <g filter="url(#soft-shadow)">
+    <rect x="72" y="60" width="252" height="44" rx="22" fill="#f7941d" fill-opacity="0.14" stroke="#f7941d" stroke-opacity="0.58"/>
+    <text x="96" y="88"
+      fill="#f7941d"
+      font-family="SF Pro Rounded, Avenir Next, Arial Rounded MT Bold, system-ui, sans-serif"
+      font-size="18"
+      font-weight="800">No sleep protocol required.</text>
+
+    <text x="72" y="205"
+      fill="#fffaf1"
+      font-family="SF Pro Rounded, Avenir Next, Arial Rounded MT Bold, system-ui, sans-serif"
+      font-size="94"
+      font-weight="900"
+      letter-spacing="-1">Sleep</text>
+    <text x="72" y="303"
+      fill="#fffaf1"
+      font-family="SF Pro Rounded, Avenir Next, Arial Rounded MT Bold, system-ui, sans-serif"
+      font-size="94"
+      font-weight="900"
+      letter-spacing="-1">Timer</text>
+    <text x="72" y="401"
+      fill="#fffaf1"
+      font-family="SF Pro Rounded, Avenir Next, Arial Rounded MT Bold, system-ui, sans-serif"
+      font-size="94"
+      font-weight="900"
+      letter-spacing="-1">Bar</text>
+
+    <text x="76" y="480"
+      fill="#f7941d"
+      font-family="SF Pro Rounded, Avenir Next, Arial Rounded MT Bold, system-ui, sans-serif"
+      font-size="38"
+      font-weight="900">For people who don't mind</text>
+    <text x="76" y="528"
+      fill="#f7941d"
+      font-family="SF Pro Rounded, Avenir Next, Arial Rounded MT Bold, system-ui, sans-serif"
+      font-size="38"
+      font-weight="900">a little TV before bed.</text>
+  </g>
+</svg>
