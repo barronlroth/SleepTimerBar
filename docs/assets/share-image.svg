@@ -2,9 +2,10 @@
   <defs>
     <linearGradient id="left-vignette" x1="0" x2="1" y1="0" y2="0">
       <stop offset="0" stop-color="#050505"/>
-      <stop offset="0.43" stop-color="#050505" stop-opacity="0.94"/>
-      <stop offset="0.72" stop-color="#050505" stop-opacity="0.42"/>
-      <stop offset="1" stop-color="#050505" stop-opacity="0.08"/>
+      <stop offset="0.38" stop-color="#050505" stop-opacity="0.96"/>
+      <stop offset="0.58" stop-color="#050505" stop-opacity="0.34"/>
+      <stop offset="0.78" stop-color="#050505" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#050505" stop-opacity="0"/>
     </linearGradient>
     <radialGradient id="warm-glow" cx="0.16" cy="0.2" r="0.52">
       <stop offset="0" stop-color="#f7941d" stop-opacity="0.2"/>
@@ -21,7 +22,7 @@
   <rect width="1200" height="630" fill="url(#warm-glow)"/>
 
   <g filter="url(#soft-shadow)">
-    <rect x="72" y="60" width="252" height="44" rx="22" fill="#f7941d" fill-opacity="0.14" stroke="#f7941d" stroke-opacity="0.58"/>
+    <rect x="72" y="60" width="292" height="44" rx="22" fill="#f7941d" fill-opacity="0.14" stroke="#f7941d" stroke-opacity="0.58"/>
     <text x="96" y="88"
       fill="#f7941d"
       font-family="SF Pro Rounded, Avenir Next, Arial Rounded MT Bold, system-ui, sans-serif"
