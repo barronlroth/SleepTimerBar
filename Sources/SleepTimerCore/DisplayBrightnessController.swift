@@ -5,6 +5,8 @@ import Foundation
 public enum DisplayBrightnessError: LocalizedError {
     case displayServicesUnavailable(String)
     case missingDisplayServicesSymbol(String)
+    case noBuiltInDisplay
+    case displayListFailed(Int32)
     case readFailed(Int32)
     case writeFailed(Int32)
 
@@ -14,6 +16,10 @@ public enum DisplayBrightnessError: LocalizedError {
             "Could not load macOS display brightness controls: \(message)"
         case .missingDisplayServicesSymbol(let name):
             "Could not find macOS display brightness control: \(name)."
+        case .noBuiltInDisplay:
+            "No active built-in display is available."
+        case .displayListFailed(let code):
+            "Could not find the built-in display (\(code))."
         case .readFailed(let code):
             "Could not read display brightness. DisplayServices returned \(code)."
         case .writeFailed(let code):
@@ -22,11 +28,13 @@ public enum DisplayBrightnessError: LocalizedError {
     }
 }
 
+@MainActor
 public protocol DisplayBrightnessControlling {
     func currentBrightness() throws -> Double
     func setBrightness(_ value: Double) throws
 }
 
+@MainActor
 public final class DisplayBrightnessController: DisplayBrightnessControlling {
     private typealias GetBrightnessFunction = @convention(c) (
         CGDirectDisplayID,
@@ -40,15 +48,17 @@ public final class DisplayBrightnessController: DisplayBrightnessControlling {
 
     private let displayServicesPath = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
 
+    // One retained loader owns both function pointers for their entire lifetime.
+    private lazy var functions: Result<DisplayServicesFunctions, Error> = Result {
+        try DisplayServicesFunctions(path: displayServicesPath)
+    }
+
     public init() {}
 
     public func currentBrightness() throws -> Double {
-        let getBrightness = try displayServicesFunction(
-            named: "DisplayServicesGetBrightness",
-            as: GetBrightnessFunction.self
-        )
+        let getBrightness = try functions.get().getBrightness
         var brightness: Float = 0
-        let result = getBrightness(builtInDisplayID(), &brightness)
+        let result = getBrightness(try builtInDisplayID(), &brightness)
 
         guard result == 0 else {
             throw DisplayBrightnessError.readFailed(result)
@@ -58,39 +68,58 @@ public final class DisplayBrightnessController: DisplayBrightnessControlling {
     }
 
     public func setBrightness(_ value: Double) throws {
-        let setBrightness = try displayServicesFunction(
-            named: "DisplayServicesSetBrightness",
-            as: SetBrightnessFunction.self
-        )
-        let result = setBrightness(builtInDisplayID(), Float(FadeMath.clamp01(value)))
+        let setBrightness = try functions.get().setBrightness
+        let result = setBrightness(try builtInDisplayID(), Float(FadeMath.clamp01(value)))
 
         guard result == 0 else {
             throw DisplayBrightnessError.writeFailed(result)
         }
     }
 
-    private func displayServicesFunction<T>(named name: String, as type: T.Type) throws -> T {
-        guard let handle = dlopen(displayServicesPath, RTLD_NOW) else {
-            let message = dlerror().map { String(cString: UnsafePointer($0)) } ?? "unknown error"
-            throw DisplayBrightnessError.displayServicesUnavailable(message)
+    private final class DisplayServicesFunctions {
+        let handle: UnsafeMutableRawPointer
+        let getBrightness: GetBrightnessFunction
+        let setBrightness: SetBrightnessFunction
+
+        init(path: String) throws {
+            guard let handle = dlopen(path, RTLD_NOW) else {
+                let message = dlerror().map { String(cString: $0) } ?? "unknown error"
+                throw DisplayBrightnessError.displayServicesUnavailable(message)
+            }
+            do {
+                guard let get = dlsym(handle, "DisplayServicesGetBrightness") else {
+                    throw DisplayBrightnessError.missingDisplayServicesSymbol("DisplayServicesGetBrightness")
+                }
+                guard let set = dlsym(handle, "DisplayServicesSetBrightness") else {
+                    throw DisplayBrightnessError.missingDisplayServicesSymbol("DisplayServicesSetBrightness")
+                }
+                self.handle = handle
+                getBrightness = unsafeBitCast(get, to: GetBrightnessFunction.self)
+                setBrightness = unsafeBitCast(set, to: SetBrightnessFunction.self)
+            } catch {
+                dlclose(handle)
+                throw error
+            }
         }
 
-        guard let symbol = dlsym(handle, name) else {
-            throw DisplayBrightnessError.missingDisplayServicesSymbol(name)
-        }
-
-        return unsafeBitCast(symbol, to: type)
+        deinit { dlclose(handle) }
     }
 
-    private func builtInDisplayID() -> CGDirectDisplayID {
+    private func builtInDisplayID() throws -> CGDirectDisplayID {
         var displayCount: UInt32 = 0
-        CGGetActiveDisplayList(0, nil, &displayCount)
-
+        var result = CGGetActiveDisplayList(0, nil, &displayCount)
+        guard result == .success else {
+            throw DisplayBrightnessError.displayListFailed(result.rawValue)
+        }
+        guard displayCount > 0 else { throw DisplayBrightnessError.noBuiltInDisplay }
         var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        CGGetActiveDisplayList(displayCount, &displays, &displayCount)
-
-        return displays
-            .prefix(Int(displayCount))
-            .first { CGDisplayIsBuiltin($0) != 0 } ?? CGMainDisplayID()
+        result = CGGetActiveDisplayList(displayCount, &displays, &displayCount)
+        guard result == .success else {
+            throw DisplayBrightnessError.displayListFailed(result.rawValue)
+        }
+        guard let display = displays.prefix(Int(displayCount)).first(where: { CGDisplayIsBuiltin($0) != 0 }) else {
+            throw DisplayBrightnessError.noBuiltInDisplay
+        }
+        return display
     }
 }

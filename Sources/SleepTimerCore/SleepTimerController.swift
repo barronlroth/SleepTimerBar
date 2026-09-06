@@ -5,13 +5,7 @@ public struct SleepTimerSnapshot: Equatable, Sendable {
     public let startedAt: Date
     public let endsAt: Date
 
-    public var totalSeconds: TimeInterval {
-        endsAt.timeIntervalSince(startedAt)
-    }
-
-    public func remainingSeconds(at date: Date = Date()) -> TimeInterval {
-        max(endsAt.timeIntervalSince(date), 0)
-    }
+    public var totalSeconds: TimeInterval { duration.seconds }
 }
 
 public enum SleepTimerState: Equatable, Sendable {
@@ -19,206 +13,230 @@ public enum SleepTimerState: Equatable, Sendable {
     case running(SleepTimerSnapshot)
 }
 
+public struct SleepTimerIssue: Equatable, Sendable {
+    public enum Source: String, Sendable {
+        case brightness = "Brightness"
+        case volume = "Volume"
+        case sleep = "Sleep"
+    }
+    public let source: Source
+    public let message: String
+}
+
 private struct SleepTimerSession {
+    let id: UUID
     let snapshot: SleepTimerSnapshot
+    let startedAt: TimeInterval
+    let brightnessFloor: Double
+    let volumeFloor: Double
+    var initialized = false
     var brightness: FadeChannel?
     var volume: FadeChannel?
+
+    var endsAt: Date {
+        Date(timeIntervalSinceReferenceDate: startedAt + snapshot.totalSeconds)
+    }
 }
 
 @MainActor
 public final class SleepTimerController {
     public private(set) var state: SleepTimerState = .idle {
-        didSet {
-            onStateChanged?(state)
-        }
+        didSet { if state != oldValue { onStateChanged?(state) } }
     }
-
+    public private(set) var issues: [SleepTimerIssue] = []
     public var onStateChanged: ((SleepTimerState) -> Void)?
-    public var onError: ((String) -> Void)?
+    public var onStatusChanged: (() -> Void)?
 
     private let settings: AppSettings
     private let brightnessController: DisplayBrightnessControlling
     private let volumeController: VolumeControlling
     private let sleepController: SystemSleepControlling
+    private let clock: SleepTimerClock
+    private let scheduler: SleepTimerScheduling
     private let updateInterval: TimeInterval
-
     private var session: SleepTimerSession?
-    private var updateTimer: Timer?
-    private var brightnessFailed = false
-    private var volumeFailed = false
+    private var generation = UUID()
+    private var updateRequested = false
+    // Internal visibility lets lifecycle tests await real asynchronous work.
+    private(set) var updateTask: Task<Void, Never>?
+
+    public var remainingSeconds: TimeInterval {
+        guard let session else { return 0 }
+        return max(0, session.snapshot.totalSeconds - (clock.now - session.startedAt))
+    }
+
+    public var estimatedSleepDate: Date? {
+        session.map { _ in clock.date.addingTimeInterval(remainingSeconds) }
+    }
 
     public init(
         settings: AppSettings,
         brightnessController: DisplayBrightnessControlling = DisplayBrightnessController(),
         volumeController: VolumeControlling = VolumeController(),
         sleepController: SystemSleepControlling = SystemSleepController(),
-        updateInterval: TimeInterval = 5
+        updateInterval: TimeInterval = 5,
+        clock: SleepTimerClock = MonotonicTimerClock(),
+        scheduler: SleepTimerScheduling = RunLoopTimerScheduler()
     ) {
+        precondition(updateInterval.isFinite && updateInterval > 0)
         self.settings = settings
         self.brightnessController = brightnessController
         self.volumeController = volumeController
         self.sleepController = sleepController
         self.updateInterval = updateInterval
+        self.clock = clock
+        self.scheduler = scheduler
     }
 
     public func toggleDefaultTimer() {
         switch state {
-        case .idle:
-            start(duration: settings.defaultDuration)
-        case .running:
-            cancel()
+        case .idle: start(duration: settings.defaultDuration)
+        case .running: cancel()
         }
     }
 
     public func start(duration: TimerDuration) {
-        cancel(sendStateUpdate: false)
-
-        let startedAt = Date()
-        let endsAt = startedAt.addingTimeInterval(duration.seconds)
-        let snapshot = SleepTimerSnapshot(duration: duration, startedAt: startedAt, endsAt: endsAt)
-
-        brightnessFailed = false
-        volumeFailed = false
-
-        let initialBrightness = readInitialBrightness().map {
-            FadeChannel(
-                currentValue: $0,
-                floor: settings.brightnessFloor,
-                curve: .linear,
-                date: startedAt
-            )
-        }
-        let initialVolume = readInitialVolume().map {
-            FadeChannel(
-                currentValue: $0,
-                floor: settings.volumeFloor,
-                curve: .linear,
-                date: startedAt
-            )
-        }
-
-        session = SleepTimerSession(
-            snapshot: snapshot,
-            brightness: initialBrightness,
-            volume: initialVolume
+        stopUpdates()
+        issues = []
+        let snapshot = SleepTimerSnapshot(
+            duration: duration, startedAt: clock.date,
+            endsAt: clock.date.addingTimeInterval(duration.seconds)
         )
-
+        session = SleepTimerSession(
+            id: generation, snapshot: snapshot, startedAt: clock.now,
+            brightnessFloor: settings.brightnessFloor, volumeFloor: settings.volumeFloor
+        )
         state = .running(snapshot)
-        scheduleTimer()
-        tick()
+        onStatusChanged?()
+        scheduler.schedule(every: updateInterval) { [weak self] in self?.requestUpdate() }
+        requestUpdate()
     }
 
     public func cancel() {
-        cancel(sendStateUpdate: true)
-    }
-
-    private func cancel(sendStateUpdate: Bool) {
-        updateTimer?.invalidate()
-        updateTimer = nil
-        session = nil
-        brightnessFailed = false
-        volumeFailed = false
-
-        if sendStateUpdate {
-            state = .idle
-        } else {
-            state = .idle
-        }
-    }
-
-    private func scheduleTimer() {
-        updateTimer?.invalidate()
-        let timer = Timer(timeInterval: updateInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.tick()
-            }
-        }
-        updateTimer = timer
-        RunLoop.main.add(timer, forMode: .common)
-    }
-
-    private func tick(date: Date = Date()) {
-        guard let session else { return }
-
-        let elapsed = date.timeIntervalSince(session.snapshot.startedAt)
-        let duration = session.snapshot.totalSeconds
-
-        guard elapsed < duration else {
-            complete()
-            return
-        }
-
-        applyFade(date: date)
-    }
-
-    private func complete() {
-        if let session {
-            applyFade(date: session.snapshot.endsAt)
-        }
-
-        updateTimer?.invalidate()
-        updateTimer = nil
-        self.session = nil
+        stopUpdates()
         state = .idle
+        onStatusChanged?()
+    }
 
-        do {
-            try sleepController.sleepNow()
-        } catch {
-            onError?((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+    /// Called for actual system sleep, including lid closure and manual sleep.
+    /// A later wake never resumes the canceled session.
+    public func systemWillSleep() {
+        cancel()
+    }
+
+    private func stopUpdates() {
+        generation = UUID()
+        scheduler.cancel()
+        session = nil
+        updateRequested = false
+        updateTask?.cancel()
+        // Keep the task until its helper exits. A new session must not overlap it.
+    }
+
+    private func requestUpdate() {
+        guard session != nil else { return }
+        updateRequested = true
+        guard updateTask == nil else { return }
+        updateTask = Task { [weak self] in
+            guard let self else { return }
+            while self.updateRequested && !Task.isCancelled {
+                self.updateRequested = false
+                await self.update()
+            }
+            self.updateTask = nil
+            if self.updateRequested { self.requestUpdate() }
         }
     }
 
-    private func applyFade(date: Date) {
-        guard var session else { return }
+    private func isCurrent(_ id: UUID) -> Bool {
+        generation == id && !Task.isCancelled
+    }
 
-        if !brightnessFailed, var brightness = session.brightness {
+    private var fadeDate: Date { Date(timeIntervalSinceReferenceDate: clock.now) }
+
+    private func update() async {
+        guard var current = session, isCurrent(current.id) else { return }
+        if !current.initialized {
             do {
-                let currentBrightness = try brightnessController.currentBrightness()
-                brightness.rebaseIfExternalChange(currentValue: currentBrightness, at: date)
-
-                let nextBrightness = brightness.value(at: date, endsAt: session.snapshot.endsAt)
-                try brightnessController.setBrightness(nextBrightness)
-                brightness.markApplied(nextBrightness)
-                session.brightness = brightness
+                let value = try brightnessController.currentBrightness()
+                current.brightness = FadeChannel(
+                    currentValue: value, floor: current.brightnessFloor, curve: .linear, date: fadeDate
+                )
+            } catch { record(error, source: .brightness) }
+            guard isCurrent(current.id) else { return }
+            do {
+                let value = try await volumeController.currentVolume()
+                guard isCurrent(current.id) else { return }
+                current.volume = FadeChannel(
+                    currentValue: value, floor: current.volumeFloor, curve: .linear, date: fadeDate
+                )
             } catch {
-                brightnessFailed = true
-                onError?((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                guard isCurrent(current.id) else { return }
+                record(error, source: .volume)
+            }
+            current.initialized = true
+        }
+        guard isCurrent(current.id) else { return }
+        let completing = clock.now >= current.startedAt + current.snapshot.totalSeconds
+        if completing { scheduler.cancel() }
+
+        if var brightness = current.brightness {
+            do {
+                let value = try brightnessController.currentBrightness()
+                let date = min(fadeDate, current.endsAt)
+                brightness.rebaseIfExternalChange(currentValue: value, at: date)
+                let next = brightness.value(at: date, endsAt: current.endsAt)
+                if abs(next - value) > 0.00001 { try brightnessController.setBrightness(next) }
+                brightness.markApplied(next)
+                current.brightness = brightness
+            } catch {
+                current.brightness = nil
+                record(error, source: .brightness)
             }
         }
-
-        if !volumeFailed, var volume = session.volume {
+        guard isCurrent(current.id) else { return }
+        if var volume = current.volume {
             do {
-                let currentVolume = try volumeController.currentVolume()
-                volume.rebaseIfExternalChange(currentValue: currentVolume, at: date)
-
-                let nextVolume = volume.value(at: date, endsAt: session.snapshot.endsAt)
-                try volumeController.setVolume(nextVolume)
-                volume.markApplied(nextVolume)
-                session.volume = volume
+                let value = try await volumeController.currentVolume()
+                guard isCurrent(current.id) else { return }
+                let date = min(fadeDate, current.endsAt)
+                volume.rebaseIfExternalChange(currentValue: value, at: date)
+                let next = volume.value(at: date, endsAt: current.endsAt)
+                let percent = (next * 100).rounded()
+                if percent != (value * 100).rounded() {
+                    try await volumeController.setVolume(percent / 100)
+                    guard isCurrent(current.id) else { return }
+                }
+                volume.markApplied(percent / 100)
+                current.volume = volume
             } catch {
-                volumeFailed = true
-                onError?((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                guard isCurrent(current.id) else { return }
+                current.volume = nil
+                record(error, source: .volume)
             }
         }
-
-        self.session = session
-    }
-
-    private func readInitialBrightness() -> Double? {
-        do {
-            return try brightnessController.currentBrightness()
-        } catch {
-            onError?((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
-            return nil
+        guard isCurrent(current.id) else { return }
+        session = current
+        if completing {
+            // Clear the session before invoking sleep: even a queued tick cannot
+            // complete twice. Channel issues never interrupt this path.
+            session = nil
+            updateRequested = false
+            state = .idle
+            onStatusChanged?()
+            guard isCurrent(current.id) else { return }
+            do {
+                try await sleepController.sleepNow()
+            } catch {
+                guard isCurrent(current.id) else { return }
+                record(error, source: .sleep)
+            }
         }
     }
 
-    private func readInitialVolume() -> Double? {
-        do {
-            return try volumeController.currentVolume()
-        } catch {
-            onError?((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
-            return nil
-        }
+    private func record(_ error: any Error, source: SleepTimerIssue.Source) {
+        issues.removeAll { $0.source == source }
+        issues.append(SleepTimerIssue(source: source, message: error.localizedDescription))
+        onStatusChanged?()
     }
 }

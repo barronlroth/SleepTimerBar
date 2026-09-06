@@ -6,6 +6,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settings = AppSettings()
     private lazy var timerController = SleepTimerController(settings: settings)
     private var statusItem: NSStatusItem?
+    private var statusTimer: Timer?
+    private weak var openMenu: NSMenu?
+
+    private enum MenuTag {
+        static let status = 1
+        static let deadline = 2
+        static let primaryAction = 3
+        static let durations = 4
+        static let brightnessIssue = 5
+        static let volumeIssue = 6
+        static let sleepIssue = 7
+    }
 
     private let floorChoices: [Double] = [0, 0.05, 0.1, 0.2, 0.3, 0.5]
 
@@ -24,12 +36,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         timerController.onStateChanged = { [weak self] _ in
             self?.refreshStatusItem()
+            self?.scheduleStatusUpdates()
         }
-        timerController.onError = { [weak self] message in
-            self?.showError(message)
-        }
+        timerController.onStatusChanged = { [weak self] in self?.refreshStatusText() }
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(systemWillSleep(_:)),
+            name: NSWorkspace.willSleepNotification, object: nil
+        )
 
         refreshStatusItem()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        statusTimer?.invalidate()
+        timerController.cancel()
+    }
+
+    @objc private func systemWillSleep(_ notification: Notification) {
+        timerController.systemWillSleep()
     }
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
@@ -84,31 +109,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let statusItem else { return }
 
         let menu = buildOptionsMenu()
+        openMenu = menu
+        refreshStatusText()
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil
+        openMenu = nil
     }
 
     private func buildOptionsMenu() -> NSMenu {
         let menu = NSMenu()
 
         let status = NSMenuItem(title: statusTitle, action: nil, keyEquivalent: "")
-        status.isEnabled = false
+        status.tag = MenuTag.status
         menu.addItem(status)
-        menu.addItem(.separator())
-
-        switch timerController.state {
-        case .idle:
-            menu.addItem(menuItem(
-                title: "Start \(settings.defaultDuration.title)",
-                action: #selector(startDuration(_:)),
-                representedObject: settings.defaultDuration.minutes
-            ))
-        case .running:
-            menu.addItem(menuItem(title: "Cancel Timer", action: #selector(cancelTimer(_:))))
+        let deadline = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        deadline.tag = MenuTag.deadline
+        menu.addItem(deadline)
+        for tag in [MenuTag.brightnessIssue, MenuTag.volumeIssue, MenuTag.sleepIssue] {
+            let issue = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            issue.tag = tag
+            issue.isHidden = true
+            menu.addItem(issue)
         }
-
-        menu.addItem(durationMenu())
+        menu.addItem(.separator())
+        let primaryAction = menuItem(title: "", action: #selector(startDuration(_:)))
+        primaryAction.tag = MenuTag.primaryAction
+        menu.addItem(primaryAction)
+        let durations = durationMenu()
+        durations.tag = MenuTag.durations
+        menu.addItem(durations)
         menu.addItem(.separator())
         menu.addItem(defaultDurationMenu())
         menu.addItem(floorMenu(title: "Brightness Floor", currentValue: settings.brightnessFloor, action: #selector(setBrightnessFloor(_:))))
@@ -204,7 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         button.image = whiteStatusImage(systemName: active ? "moon.zzz.fill" : "moon.zzz")
         button.contentTintColor = .white
-        button.toolTip = statusTitle
+        refreshStatusText()
     }
 
     private func whiteStatusImage(systemName: String) -> NSImage? {
@@ -239,8 +269,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch timerController.state {
         case .idle:
             return "Sleep Timer Idle"
-        case .running(let snapshot):
-            let minutes = Int(ceil(snapshot.remainingSeconds() / 60))
+        case .running:
+            let minutes = Int(ceil(timerController.remainingSeconds / 60))
             return "Sleep in \(minutes) min"
         }
     }
@@ -249,13 +279,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         "\(Int((value * 100).rounded()))%"
     }
 
-    private func showError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "Sleep Timer"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+    private func scheduleStatusUpdates() {
+        statusTimer?.invalidate()
+        statusTimer = nil
+        guard case .running = timerController.state else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshStatusText() }
+        }
+        statusTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func refreshStatusText() {
+        statusItem?.button?.toolTip = statusTitle
+        guard let menu = openMenu else { return }
+        menu.item(withTag: MenuTag.status)?.title = statusTitle
+        let deadline = menu.item(withTag: MenuTag.deadline)
+        deadline?.isHidden = timerController.estimatedSleepDate == nil
+        if let date = timerController.estimatedSleepDate {
+            deadline?.title = "Sleep at \(date.formatted(date: .omitted, time: .shortened))"
+        }
+        let running: Bool
+        let primaryAction = menu.item(withTag: MenuTag.primaryAction)
+        switch timerController.state {
+        case .idle:
+            running = false
+            primaryAction?.title = "Start \(settings.defaultDuration.title)"
+            primaryAction?.action = #selector(startDuration(_:))
+            primaryAction?.representedObject = settings.defaultDuration.minutes
+        case .running:
+            running = true
+            primaryAction?.title = "Cancel Timer"
+            primaryAction?.action = #selector(cancelTimer(_:))
+            primaryAction?.representedObject = nil
+        }
+        if let durations = menu.item(withTag: MenuTag.durations)?.submenu {
+            for item in durations.items {
+                guard let minutes = item.representedObject as? Int else { continue }
+                item.title = running ? "Restart \(minutes) min" : "\(minutes) min"
+            }
+        }
+        let sources: [(SleepTimerIssue.Source, Int)] = [
+            (.brightness, MenuTag.brightnessIssue), (.volume, MenuTag.volumeIssue), (.sleep, MenuTag.sleepIssue)
+        ]
+        for (source, tag) in sources {
+            let item = menu.item(withTag: tag)
+            let issue = timerController.issues.first { $0.source == source }
+            item?.isHidden = issue == nil
+            item?.toolTip = issue?.message
+            if issue != nil {
+                if source == .sleep {
+                    item?.title = "Could not put the Mac to sleep"
+                } else {
+                    item?.title = "\(source.rawValue) unavailable" + (running ? "; timer still active" : "")
+                }
+            }
+        }
     }
 }
 
